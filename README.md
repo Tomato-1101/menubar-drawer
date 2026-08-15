@@ -41,9 +41,10 @@ macOS には他アプリのステータスアイテムを隠す API も、クリ
    読んだ内容で自前の `NSMenu` を組んで引き出しアイコンの真下に出し、選ばれた項目を `AXPress` で実行する。
    アイテムは画面外に置いたまま、カーソルも一切動かさない
 
-この Mac での内訳: **引き出しから開ける 9個**（LINE / Tailscale / Ollama / Capsomnia / ChatGPT / AltTab /
-mic-lock / voicekey / 入力ソース）、**開けない 6個**（Spotlight / What Watt? / パスワード / Nani / Blip / moomoo_OpenD）。
-開けないものは引き出しの中で薄く表示し、右下にオレンジの印を付ける。
+AXMenu を持たないアプリも、下の「ポップオーバー型の開き方」の振り分けでほぼ全部開ける
+（この Mac で従来フォールバックに落ちるのは微信だけ）。小窓で開くものは位置も
+引き出しアイコン直下に揃える（幅 600 未満を小窓とみなす。Nani のような通常ウィンドウは
+アプリが決めた位置を尊重して動かさない）。
 
 ## 実測でわかったこと（推測でいじらないための記録）
 
@@ -66,8 +67,9 @@ mic-lock / voicekey / 入力ソース）、**開けない 6個**（Spotlight / W
 |---|---|---|
 | `spotlight-hotkey` | Spotlight（AXPress を無視する唯一の例） | symbolichotkeys から実際のショートカットを読んでキー合成 |
 | `lazy-menu` | moomoo_OpenD（押すと AXMenu が遅延生成される） | 画面外に開いたメニューを Esc で捨て、読めた項目で自前メニュー |
-| `window-onscreen` | Nani（通常ウィンドウ）/ Blip(自前で画面内にクランプ) | 何もしない（もう見えている） |
-| `window-pulled` | Passwords（ポップオーバーがアイテム x に張り付く） | AX でウィンドウの kAXPosition を書き、引き出しアイコン直下へ引き戻す |
+| `window-onscreen` | Nani（通常ウィンドウ・幅600以上） | 何もしない（アプリが決めた位置を尊重） |
+| `window-onscreen-moved` | Blip（小窓が画面内の変な位置に開く） | AX で kAXPosition を書いて引き出しアイコン直下へ揃える |
+| `window-pulled` | Passwords（ポップオーバーがアイテム x に張り付き画面外に開く） | 同上（画面外からの引き戻し） |
 | `reveal` | 上のどれも起きないアプリ（微信で実測） | 従来どおりメニューバーに展開して利用者に押してもらう |
 
 ## 既知の制約

@@ -194,7 +194,7 @@ private struct DrawerCell: View {
                     .font(.system(size: 10))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .foregroundStyle(.primary.opacity(item.canOpenInDrawer ? 0.78 : 0.45))
+                    .foregroundStyle(.primary.opacity(0.78))
             }
             .frame(width: width, height: height)
             .background(
@@ -205,42 +205,22 @@ private struct DrawerCell: View {
         .buttonStyle(.plain)
         .accessibilityLabel(item.displayName)
         .onHover { isHovered = $0 }
-        .help(helpText)
+        .help(item.help.isEmpty ? item.displayName : item.help)
     }
 
-    /// 引き出しから開けないもの（ポップオーバー型）は薄く出し、右下に印を付ける
     private var icon: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Group {
-                if let image = item.icon {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 32, height: 32)
-                } else {
-                    Image(systemName: "app.dashed")
-                        .font(.system(size: 26))
-                        .foregroundStyle(.primary.opacity(0.5))
-                }
-            }
-            .opacity(item.canOpenInDrawer ? 1 : 0.45)
-
-            if !item.canOpenInDrawer {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .background(Circle().fill(.black.opacity(0.35)))
-                    .offset(x: 3, y: 2)
+        Group {
+            if let image = item.icon {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 32, height: 32)
+            } else {
+                Image(systemName: "app.dashed")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.primary.opacity(0.5))
             }
         }
         .frame(width: 32, height: 32)
-    }
-
-    private var helpText: String {
-        if !item.canOpenInDrawer {
-            return "\(item.displayName) はメニューを読み取れないタイプです。"
-                 + "押すとメニューバーに展開するので、そこをクリックしてください"
-        }
-        return item.help.isEmpty ? item.displayName : item.help
     }
 }

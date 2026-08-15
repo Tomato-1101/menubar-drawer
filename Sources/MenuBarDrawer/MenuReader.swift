@@ -33,11 +33,6 @@ private final class EntryBox {
 /// 引き出しの中に自前のメニューをそのまま出せる。
 enum MenuReader {
 
-    /// 引き出しの中で開けるアイテムか（AXMenu を持つか）
-    static func hasMenu(_ element: AXUIElement) -> Bool {
-        children(element).contains { role(of: $0) == "AXMenu" }
-    }
-
     /// 読み取れる項目を返す。空なら AXMenu を持たないアプリ（NSPopover 型など）
     static func read(_ item: MenuBarItem) -> [MenuEntry] {
         guard let menu = children(item.element).first(where: { role(of: $0) == "AXMenu" }) else { return [] }

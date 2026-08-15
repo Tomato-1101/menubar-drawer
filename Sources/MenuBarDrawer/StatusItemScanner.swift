@@ -12,8 +12,6 @@ struct MenuBarItem: Identifiable, Equatable {
     let title: String
     let help: String
     let frame: CGRect
-    /// AX でメニューを読める＝引き出しの中で開ける。false はポップオーバー型
-    let canOpenInDrawer: Bool
 
     /// ステータスアイテム固有の名前があればそれを、無ければアプリ名を出す
     var displayName: String {
@@ -63,8 +61,7 @@ enum StatusItemScanner {
                         icon: app.icon,
                         title: (copyAttribute(element, kAXTitleAttribute as String) as? String) ?? "",
                         help: (copyAttribute(element, kAXHelpAttribute as String) as? String) ?? "",
-                        frame: frame,
-                        canOpenInDrawer: MenuReader.hasMenu(element)
+                        frame: frame
                     )
                 )
             }

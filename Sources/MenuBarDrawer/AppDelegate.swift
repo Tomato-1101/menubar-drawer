@@ -160,9 +160,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // b. 画面内に開いた（Nani / Blip / 帯より右にいる What Watt?）。もう使える状態なので何もしない
+        // b. 画面内に開いた（Blip は左端、Nani は中央）。小窓は出る場所が揃うよう引き出しの真下へ寄せる。
+        //    通常ウィンドウ（Nani の 1240x780）はアプリが決めた位置なので動かさない
         if let visible = opened.first(where: { WindowDetector.isOnScreen($0.bounds) }) {
-            log.notice("popover \(name, privacy: .public) route=window-onscreen x=\(Int(visible.bounds.origin.x))")
+            guard visible.bounds.width < 600 else {
+                log.notice("popover \(name, privacy: .public) route=window-onscreen x=\(Int(visible.bounds.origin.x))")
+                return
+            }
+            let centerX = popoverCenterX
+            DispatchQueue.global(qos: .userInitiated).async {
+                let moved = WindowDetector.align([visible], toCenterX: centerX)
+                DispatchQueue.main.async {
+                    // 動かせなくても画面内には出ていて使えるので、ログを残すだけにする
+                    guard moved else {
+                        log.notice("popover \(name, privacy: .public) route=window-onscreen x=\(Int(visible.bounds.origin.x))")
+                        return
+                    }
+                    log.notice("popover \(name, privacy: .public) route=window-onscreen-moved x=\(Int(centerX))")
+                }
+            }
             return
         }
 
@@ -171,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !offscreen.isEmpty {
             let centerX = popoverCenterX
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let moved = WindowDetector.pullOnScreen(offscreen, centerX: centerX)
+                let moved = WindowDetector.align(offscreen, toCenterX: centerX)
                 DispatchQueue.main.async {
                     guard let self else { return }
                     guard moved else {

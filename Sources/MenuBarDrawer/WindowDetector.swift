@@ -33,36 +33,75 @@ enum WindowDetector {
         return rect.maxX > 0 && rect.minX < size.width && rect.maxY > 0 && rect.minY < size.height
     }
 
-    /// 画面外に開いてしまったポップオーバーを、AX で画面内へ引き戻す。
+    /// 開いたポップオーバーを、AX で指定した中心 x（引き出しアイコンの真下）へ寄せる。
     ///
-    /// Passwords のようにアイテムの x へ厳密にアンカーするポップオーバーは、
-    /// 押し出し中だとそのまま画面外に出て見えない。位置は書き換え可能（実測 positionSettable=true）。
+    /// 押し出し中は開く場所がアプリ任せでばらつく。Passwords のようにアイテムの x へ厳密に
+    /// アンカーするものは画面外に出て見えず、Blip のように画面左端へ寄るものもある。
+    /// どちらも同じ経路でここへ揃える。位置は書き換え可能（実測 positionSettable=true）。
+    /// y は触らない — どのポップオーバーも既にメニューバー直下の高さで開いているため。
     /// AX がブロックすることがあるので**メインスレッドから呼ばない**。
-    /// - Returns: 1つでも画面内に移せたか
-    static func pullOnScreen(_ windows: [Window], centerX: CGFloat) -> Bool {
+    /// - Returns: 1つでも動かせたか
+    static func align(_ windows: [Window], toCenterX centerX: CGFloat) -> Bool {
         var moved = false
 
-        for pid in Set(windows.map(\.pid)) {
-            let axApp = AXUIElementCreateApplication(pid)
-            guard let axWindows = copyAttribute(axApp, kAXWindowsAttribute as String) as? [AXUIElement] else { continue }
+        for window in windows {
+            guard let axWindow = axElement(of: window) else { continue }
+            let frame = frameOf(axWindow)
+            guard frame.width > 0 else { continue }
 
-            for axWindow in axWindows {
-                let frame = frameOf(axWindow)
-                guard frame.width > 0, !isOnScreen(frame) else { continue }
+            let destinationX = onScreenX(width: frame.width, centerX: centerX)
+            var origin = CGPoint(x: destinationX, y: frame.origin.y)
+            guard let value = AXValueCreate(.cgPoint, &origin),
+                  AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, value) == .success
+            else { continue }
 
-                var origin = CGPoint(x: onScreenX(width: frame.width, centerX: centerX), y: frame.origin.y)
-                guard let value = AXValueCreate(.cgPoint, &origin),
-                      AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, value) == .success
-                else { continue }
-
-                // 設定できた＝動いた とは限らないので、位置を読み直して確かめる
-                if isOnScreen(frameOf(axWindow)) { moved = true }
-            }
+            // 設定できた＝動いた とは限らないので、位置を読み直して確かめる
+            if abs(frameOf(axWindow).origin.x - destinationX) < 2 { moved = true }
         }
         return moved
     }
 
     // MARK: - 内部
+
+    /// CGWindowList で見つけたウィンドウに対応する AX 要素を返す。
+    ///
+    /// kAXWindows に素直に載るもの（Passwords / What Watt? の AXSystemDialog）と、
+    /// そこに一切載らないもの（Blip の AXPopover。kAXWindows は 0 件＝実測）がある。
+    /// 後者はウィンドウの中の座標からヒットテストで掴んで、親をたどって入れ物まで戻る。
+    /// ヒットテストの起点は必ず対象アプリの要素にする（システム全体を起点にすると
+    /// 他アプリのウィンドウを掴んで動かしてしまう＝調査中に実際に起きた）。
+    private static func axElement(of window: Window) -> AXUIElement? {
+        let axApp = AXUIElementCreateApplication(window.pid)
+
+        if let axWindows = copyAttribute(axApp, kAXWindowsAttribute as String) as? [AXUIElement],
+           let match = axWindows.first(where: { sameSize(frameOf($0).size, window.bounds.size) }) {
+            return match
+        }
+        return hitTest(axApp, at: CGPoint(x: window.bounds.midX, y: window.bounds.midY))
+    }
+
+    private static func hitTest(_ axApp: AXUIElement, at point: CGPoint) -> AXUIElement? {
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit) == .success,
+              var element = hit
+        else { return nil }
+
+        // 当たるのは中身の部品なので、位置を持つ入れ物まで親をさかのぼる
+        for _ in 0..<8 {
+            switch copyAttribute(element, kAXRoleAttribute as String) as? String {
+            case "AXPopover", "AXWindow", "AXSheet":
+                return element
+            default:
+                guard let parent = copyAttribute(element, kAXParentAttribute as String) else { return nil }
+                element = parent as! AXUIElement
+            }
+        }
+        return nil
+    }
+
+    private static func sameSize(_ a: CGSize, _ b: CGSize) -> Bool {
+        abs(a.width - b.width) < 2 && abs(a.height - b.height) < 2
+    }
 
     private static func all() -> [Window] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
