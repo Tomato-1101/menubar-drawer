@@ -11,6 +11,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pusher: ItemPusher!
     private var panel: DrawerPanel!
 
+    /// メニューバーに展開中のアイテムを戻すために必要な幅。展開できるのは常に1件だけ
+    private var revealedShift: CGFloat = 0
+    private var revealedItem: MenuBarItem?
+    private var restoreTimer: Timer?
+
+    /// 展開したあと自動でクリックするか。既定 OFF（ON のときだけカーソルが動く）
+    private var autoClickEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "autoClickAfterReveal") }
+        set { UserDefaults.standard.set(newValue, forKey: "autoClickAfterReveal") }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestAccessibilityPermissionIfNeeded()
         log.notice("launched trusted=\(AXIsProcessTrusted())")
@@ -38,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // 終了時に押し出しを解除しないと、アイテムが画面外に取り残されて見えなくなる
+        restoreTimer?.invalidate()
         pusher?.release()
     }
 
@@ -61,6 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let screen = buttonWindow.screen ?? NSScreen.main
         else { return }
 
+        // 前回の展開が残っていれば畳んでから開く（展開は常に1件だけ）
+        restoreReveal()
+
         // 引き出しに載せるのは「押し出されて隠れているもの」だけ。
         // メニューバーに出ているアイテムまで並べると同じものが二か所に見えてしまう
         let hidden = StatusItemScanner.scan().filter { $0.isOffscreen }
@@ -80,7 +95,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         log.notice("activate \(item.displayName, privacy: .public) entries=\(entries.count)")
 
         panel.dismiss()
-        showMenu(entries.isEmpty ? unsupportedMenu(for: item) : buildMenu(entries))
+
+        guard !entries.isEmpty else {
+            revealToMenuBar(item)
+            return
+        }
+        showMenu(buildMenu(entries))
+    }
+
+    /// ポップオーバー型（AX にメニューが無いアプリ）は引き出しの中では開けないので、
+    /// そのアイテムをメニューバーに展開して、利用者自身に押してもらう。
+    ///
+    /// 帯より左の並び順は macOS 側で固定で動かせないため、対象より右にいるアイテムも
+    /// 一緒に出てくる（対象1個だけを出すには ⌘ドラッグ合成での並べ替えが要る＝やらない）。
+    /// 展開は常に1件だけで、新しく展開すると前の展開は畳む。
+    private func revealToMenuBar(_ item: MenuBarItem) {
+        restoreReveal()
+
+        let shift = pusher.reveal(itemAt: item.frame.origin.x, targetX: revealTargetX)
+        revealedShift = shift
+        revealedItem = item
+        log.notice("reveal \(item.displayName, privacy: .public) shift=\(shift) autoClick=\(self.autoClickEnabled)")
+
+        // 展開しっぱなしにしない。触らなければ自分で畳む
+        restoreTimer?.invalidate()
+        restoreTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+            self?.restoreReveal()
+        }
+
+        // 展開しても本当に見えているかは別問題。アイテムが多いとノッチの下に入って見えない
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, let target = self.revealedItem, target.id == item.id else { return }
+
+            let frame = StatusItemScanner.liveFrame(of: item)
+            guard isVisibleOnMenuBar(frame) else {
+                log.notice("reveal \(item.displayName, privacy: .public) 失敗: x=\(frame.origin.x) は見えない位置")
+                self.restoreReveal()
+                self.showMenu(self.cannotRevealMenu(for: item))
+                return
+            }
+
+            guard self.autoClickEnabled else { return }
+            // ここだけカーソルが動く。設定で明示的に ON にしたときのみ
+            let ok = StatusItemScanner.click(item)
+            log.notice("auto click \(item.displayName, privacy: .public) x=\(frame.origin.x) ok=\(ok)")
+        }
+    }
+
+    /// メニューバー上で実際に見えている位置か。ノッチの下と画面外は見えない
+    private func isVisibleOnMenuBar(_ frame: CGRect) -> Bool {
+        guard frame.width > 0, frame.origin.x >= 0 else { return false }
+        guard let screen = statusItem.button?.window?.screen ?? NSScreen.main else { return true }
+        if let rightArea = screen.auxiliaryTopRightArea {
+            return frame.minX >= rightArea.minX
+        }
+        return true
+    }
+
+    /// 展開しても見えなかったときに、理由と手が残っていることを伝える
+    private func cannotRevealMenu(for item: MenuBarItem) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        for line in [
+            "\(item.displayName) はメニューバーに出せませんでした",
+            "隠しているアイテムが多く、ノッチの下に入ってしまいます"
+        ] {
+            let row = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            menu.addItem(row)
+        }
+
+        menu.addItem(.separator())
+
+        let hint = NSMenuItem(title: "⌘ を押しながら引き出しアイコンより右へドラッグすると常に出せます",
+                              action: nil, keyEquivalent: "")
+        hint.isEnabled = false
+        menu.addItem(hint)
+
+        let release = NSMenuItem(title: "折りたたみを一時解除する", action: #selector(togglePush), keyEquivalent: "")
+        release.target = self
+        menu.addItem(release)
+
+        return menu
+    }
+
+    /// 展開していたぶんを畳んで元に戻す
+    private func restoreReveal() {
+        restoreTimer?.invalidate()
+        restoreTimer = nil
+        guard revealedShift > 0 else {
+            revealedItem = nil
+            return
+        }
+        pusher.restore(shift: revealedShift)
+        log.notice("restore \(self.revealedItem?.displayName ?? "-", privacy: .public)")
+        revealedShift = 0
+        revealedItem = nil
+    }
+
+    /// アイテムを展開する先。ノッチの下は表示されないので、その右側を狙う
+    private var revealTargetX: CGFloat {
+        let screen = statusItem.button?.window?.screen ?? NSScreen.main
+        if let notchRight = screen?.auxiliaryTopRightArea?.minX {
+            return notchRight + 40
+        }
+        return (screen?.frame.width ?? 1440) * 0.6
     }
 
     /// メニューは常に引き出しアイコンの真下に出す。
@@ -118,44 +238,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuReader.perform(entry)
     }
 
-    /// ポップオーバー型（クリックするとパネルが出るタイプ）は AX にメニューが無く、中身を読めない。
-    ///
-    /// 代わりにアイテムをメニューバーへ戻して合成クリックする、という手も動きはするが、
-    /// カーソルが勝手に飛ぶ挙動になるので入れない（Tomato 指示: 無理なら無理と言う・
-    /// 無理やりマウスを動かす動作は絶対に入れない）。できないことはそう表示して、
-    /// 折りたたみを一時解除する導線だけ出す。
-    private func unsupportedMenu(for item: MenuBarItem) -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        for line in [
-            "\(item.displayName) は引き出しから開けません",
-            "クリックでパネルを出すタイプのため、メニューの中身を読み取れません"
-        ] {
-            let row = NSMenuItem(title: line, action: nil, keyEquivalent: "")
-            row.isEnabled = false
-            menu.addItem(row)
-        }
-
-        menu.addItem(.separator())
-
-        let release = NSMenuItem(title: "折りたたみを一時解除してメニューバーに戻す",
-                                 action: #selector(togglePush), keyEquivalent: "")
-        release.target = self
-        menu.addItem(release)
-
-        let hint = NSMenuItem(title: "常に出しておくには ⌘ を押しながら引き出しアイコンより右へドラッグ",
-                              action: nil, keyEquivalent: "")
-        hint.isEnabled = false
-        menu.addItem(hint)
-
-        return menu
-    }
-
     // MARK: - 右クリックメニュー
 
     private func showContextMenu() {
         let menu = NSMenu()
+
+        if let revealed = revealedItem {
+            let back = NSMenuItem(title: "\(revealed.displayName) の展開を戻す",
+                                  action: #selector(restoreRevealFromMenu), keyEquivalent: "")
+            back.target = self
+            menu.addItem(back)
+            menu.addItem(.separator())
+        }
+
+        let autoClick = NSMenuItem(
+            title: "展開したら自動でクリックする",
+            action: #selector(toggleAutoClick),
+            keyEquivalent: ""
+        )
+        autoClick.target = self
+        autoClick.state = autoClickEnabled ? .on : .off
+        menu.addItem(autoClick)
 
         let toggle = NSMenuItem(
             title: pusher.isPushing ? "メニューバーへ戻す（折りたたみ解除）" : "メニューバーを折りたたむ",
@@ -182,12 +285,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePush() {
+        restoreReveal()
         if pusher.isPushing {
             pusher.release()
         } else {
             pusher.push()
         }
         log.notice("togglePush isPushing=\(self.pusher.isPushing)")
+    }
+
+    @objc private func toggleAutoClick() {
+        autoClickEnabled.toggle()
+        log.notice("autoClick=\(self.autoClickEnabled)")
+    }
+
+    @objc private func restoreRevealFromMenu() {
+        restoreReveal()
     }
 
     // MARK: - 配置と権限

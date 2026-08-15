@@ -74,6 +74,29 @@ enum StatusItemScanner {
         return results.sorted { $0.frame.origin.x < $1.frame.origin.x }
     }
 
+    /// アイテムのいまの位置を取り直す（押し出しを緩めた直後は座標が動いているため）
+    static func liveFrame(of item: MenuBarItem) -> CGRect {
+        frameOf(item.element)
+    }
+
+    /// メニューバーに展開したアイテムを実クリックして開く。
+    ///
+    /// **カーソルを動かす唯一の処理**。既定では呼ばれない。
+    /// 設定「展開したら自動でクリックする」を利用者が明示的に ON にしたときだけ使う。
+    @discardableResult
+    static func click(_ item: MenuBarItem) -> Bool {
+        let frame = frameOf(item.element)
+        guard frame.width > 0, frame.origin.x >= 0 else { return false }
+
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        let source = CGEventSource(stateID: .combinedSessionState)
+        CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?
+            .post(tap: .cghidEventTap)
+        CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?
+            .post(tap: .cghidEventTap)
+        return true
+    }
+
     // MARK: - AX ヘルパ
 
     private static func copyAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {

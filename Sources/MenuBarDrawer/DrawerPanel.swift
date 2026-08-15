@@ -238,7 +238,8 @@ private struct DrawerCell: View {
 
     private var helpText: String {
         if !item.canOpenInDrawer {
-            return "\(item.displayName) は引き出しから開けません（クリックでパネルを出すタイプ）"
+            return "\(item.displayName) はメニューを読み取れないタイプです。"
+                 + "押すとメニューバーに展開するので、そこをクリックしてください"
         }
         return item.help.isEmpty ? item.displayName : item.help
     }
