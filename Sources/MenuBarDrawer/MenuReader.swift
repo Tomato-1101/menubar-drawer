@@ -20,6 +20,11 @@ final class MenuEntry {
     }
 }
 
+/// 時間切れで読み捨てるときに、書き込み側と読み出し側で同じ入れ物を指すための箱
+private final class EntryBox {
+    var entries: [MenuEntry] = []
+}
+
 /// 他アプリのステータスアイテムのメニューを、AX 経由で「開かずに」読む。
 ///
 /// これが成立するのがこのアプリの肝。メニューを開かなくても AX ツリーには AXMenu と
@@ -37,6 +42,20 @@ enum MenuReader {
     static func read(_ item: MenuBarItem) -> [MenuEntry] {
         guard let menu = children(item.element).first(where: { role(of: $0) == "AXMenu" }) else { return [] }
         return entries(of: menu, depth: 0)
+    }
+
+    /// 見切りをつけながら読む。
+    ///
+    /// 押した直後の相手はメニュートラッキング中で、AX が返ってこないことがある（moomoo で実測）。
+    /// 呼び出し側のスレッドをそこで止めないよう、時間切れなら空で返す。**メインスレッドから呼ばない**
+    static func read(_ item: MenuBarItem, timeout: TimeInterval) -> [MenuEntry] {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = EntryBox()
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.entries = read(item)
+            semaphore.signal()
+        }
+        return semaphore.wait(timeout: .now() + timeout) == .success ? box.entries : []
     }
 
     /// 項目を実行する。メニューを開いていなくても効く（実測: Tailscale の Open Tailscale で確認）。

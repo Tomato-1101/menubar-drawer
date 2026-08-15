@@ -97,10 +97,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.dismiss()
 
         guard !entries.isEmpty else {
-            revealToMenuBar(item)
+            openWithoutMenu(item)
             return
         }
         showMenu(buildMenu(entries))
+    }
+
+    // MARK: - AX にメニューが無いアイテム（ポップオーバー型）
+
+    /// メニューを読めないアイテムを開く。
+    ///
+    /// 開き方はアプリごとに違い、事前には見分けられないので、押してから何が起きたかで振り分ける。
+    /// メニューバーへの展開（revealToMenuBar）は、どれも当たらなかったときの最後の手段。
+    private func openWithoutMenu(_ item: MenuBarItem) {
+        // Spotlight は押下そのものを無視する（AXPress が success を返すのに何も開かない＝実測）。
+        // 画面内にいても開かないので、展開しても無駄。開く手段はショートカットだけ
+        if item.bundleID == "com.apple.Spotlight" {
+            guard let hotkey = SpotlightHotkey.current() else {
+                log.notice("popover \(item.displayName, privacy: .public) route=spotlight-hotkey-disabled")
+                revealToMenuBar(item)
+                return
+            }
+            hotkey.post()
+            log.notice("popover \(item.displayName, privacy: .public) route=spotlight-hotkey key=\(hotkey.keyCode)")
+            return
+        }
+
+        // 押す前のウィンドウを控えておく。何が開いたかはこの差分でしか分からない
+        // （AX の kAXWindows に載らないポップオーバーがある＝Blip で実測）
+        let before = WindowDetector.snapshot()
+
+        // AXPress は相手がメニュートラッキングに入ると返ってこない（moomoo で実測 >1.2s）。
+        // 戻り値は当てにならないので投げ捨て、結果は開いたものを見て判断する
+        DispatchQueue.global(qos: .userInitiated).async {
+            AXUIElementPerformAction(item.element, kAXPressAction as CFString)
+        }
+
+        // 判定も別スレッドで。上の AXPress とは別のブロックなので、詰まっていても巻き込まれない
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            let entries = MenuReader.read(item, timeout: 1.0)
+            let opened = WindowDetector.newWindows(since: before)
+            DispatchQueue.main.async {
+                self?.routePopover(item, entries: entries, opened: opened)
+            }
+        }
+    }
+
+    /// 押した結果を見て、後始末と表示を決める
+    private func routePopover(_ item: MenuBarItem, entries: [MenuEntry], opened: [WindowDetector.Window]) {
+        let name = item.displayName
+
+        // a. 押したことでメニューが遅れて生えるアプリ（moomoo_OpenD）。
+        //    そのメニューは画面外で開いているので Esc で捨て、読めた中身で自前のメニューを出し直す
+        if !entries.isEmpty {
+            sendEscape()
+            log.notice("popover \(name, privacy: .public) route=lazy-menu entries=\(entries.count)")
+            // Esc の直後に出すと自前のメニューまで一緒に閉じられる
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self else { return }
+                self.showMenu(self.buildMenu(entries))
+            }
+            return
+        }
+
+        // b. 画面内に開いた（Nani / Blip / 帯より右にいる What Watt?）。もう使える状態なので何もしない
+        if let visible = opened.first(where: { WindowDetector.isOnScreen($0.bounds) }) {
+            log.notice("popover \(name, privacy: .public) route=window-onscreen x=\(Int(visible.bounds.origin.x))")
+            return
+        }
+
+        // c. アイテムの x に張り付いて画面外に開いた（Passwords 型）→ AX で画面内へ引き戻す
+        let offscreen = opened.filter { !WindowDetector.isOnScreen($0.bounds) }
+        if !offscreen.isEmpty {
+            let centerX = popoverCenterX
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let moved = WindowDetector.pullOnScreen(offscreen, centerX: centerX)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard moved else {
+                        log.notice("popover \(name, privacy: .public) route=window-offscreen-stuck → reveal")
+                        self.sendEscape()
+                        self.revealToMenuBar(item)
+                        return
+                    }
+                    log.notice("popover \(name, privacy: .public) route=window-pulled x=\(Int(centerX))")
+                }
+            }
+            return
+        }
+
+        // d. 何も起きなかった → 従来どおりメニューバーへ展開して、利用者自身に押してもらう
+        log.notice("popover \(name, privacy: .public) route=reveal")
+        revealToMenuBar(item)
+    }
+
+    /// 引き戻したポップオーバーを置く位置。引き出しアイコンの真下に合わせる
+    private var popoverCenterX: CGFloat {
+        guard let button = statusItem.button, let window = button.window else {
+            return (NSScreen.main?.frame.width ?? 1512) / 2
+        }
+        return window.convertToScreen(button.convert(button.bounds, to: nil)).midX
+    }
+
+    /// 開いてしまったメニュー / ポップオーバーを閉じる。キーだけ送る（カーソルは動かさない）
+    private func sendEscape() {
+        for isDown in [true, false] {
+            CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: isDown)?.post(tap: .cghidEventTap)
+        }
     }
 
     /// ポップオーバー型（AX にメニューが無いアプリ）は引き出しの中では開けないので、
