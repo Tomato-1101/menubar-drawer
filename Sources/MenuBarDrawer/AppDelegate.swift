@@ -123,11 +123,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.restoreReveal()
         }
 
-        // 展開しても本当に見えているかは別問題。アイテムが多いとノッチの下に入って見えない
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        // 展開しても本当に見えているかは別問題。アイテムが多いとノッチの下に入って見えない。
+        // 押し出しを緩めた直後の AX は移動途中の座標を返すので、止まるまで待ってから判定する
+        waitUntilLayoutSettles(item) { [weak self] frame in
             guard let self, let target = self.revealedItem, target.id == item.id else { return }
 
-            let frame = StatusItemScanner.liveFrame(of: item)
             guard isVisibleOnMenuBar(frame) else {
                 log.notice("reveal \(item.displayName, privacy: .public) 失敗: x=\(frame.origin.x) は見えない位置")
                 self.restoreReveal()
@@ -139,6 +139,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // ここだけカーソルが動く。設定で明示的に ON にしたときのみ
             let ok = StatusItemScanner.click(item)
             log.notice("auto click \(item.displayName, privacy: .public) x=\(frame.origin.x) ok=\(ok)")
+        }
+    }
+
+    /// メニューバーの再レイアウトが終わる（座標が2回続けて同じになる）まで待つ。
+    /// 押し出しを緩めた直後に測ると移動途中の座標が返り、見えているのに「見えない」と誤判定する。
+    private func waitUntilLayoutSettles(
+        _ item: MenuBarItem,
+        attemptsLeft: Int = 30,
+        lastX: CGFloat = .infinity,
+        completion: @escaping (CGRect) -> Void
+    ) {
+        let frame = StatusItemScanner.liveFrame(of: item)
+        // 画面内に入り、かつ座標が前回と同じ＝移動が終わった。
+        // x>=0 を条件に入れないと「まだ動き出していない画面外の座標」を2回読んで
+        // 安定と誤判定する（実測: -3205 のまま見えない判定になった）
+        if frame.width > 0, frame.origin.x >= 0, frame.origin.x == lastX {
+            completion(frame)
+            return
+        }
+        guard attemptsLeft > 0 else {
+            completion(frame)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            self?.waitUntilLayoutSettles(item, attemptsLeft: attemptsLeft - 1,
+                                         lastX: frame.origin.x, completion: completion)
         }
     }
 
