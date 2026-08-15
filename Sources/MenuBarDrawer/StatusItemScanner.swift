@@ -12,6 +12,8 @@ struct MenuBarItem: Identifiable, Equatable {
     let title: String
     let help: String
     let frame: CGRect
+    /// AX でメニューを読める＝引き出しの中で開ける。false はポップオーバー型
+    let canOpenInDrawer: Bool
 
     /// ステータスアイテム固有の名前があればそれを、無ければアプリ名を出す
     var displayName: String {
@@ -19,7 +21,7 @@ struct MenuBarItem: Identifiable, Equatable {
         return appName
     }
 
-    /// Hidden Bar 等に画面外へ押し出されている（＝いまメニューバーから触れない）
+    /// 押し出されて画面外にいる（＝いまメニューバーから触れない）
     var isOffscreen: Bool { frame.origin.x < 0 }
 
     static func == (lhs: MenuBarItem, rhs: MenuBarItem) -> Bool { lhs.id == rhs.id }
@@ -61,7 +63,8 @@ enum StatusItemScanner {
                         icon: app.icon,
                         title: (copyAttribute(element, kAXTitleAttribute as String) as? String) ?? "",
                         help: (copyAttribute(element, kAXHelpAttribute as String) as? String) ?? "",
-                        frame: frame
+                        frame: frame,
+                        canOpenInDrawer: MenuReader.hasMenu(element)
                     )
                 )
             }
@@ -69,41 +72,6 @@ enum StatusItemScanner {
 
         // メニューバー上の左右の並びを保つ（画面外に押し出されたぶんは負の x なので自然に先頭に来る）
         return results.sorted { $0.frame.origin.x < $1.frame.origin.x }
-    }
-
-    /// アイテムのいまの位置を取り直す（押し出しを緩めた直後は座標が動いているため）
-    static func liveFrame(of item: MenuBarItem) -> CGRect {
-        frameOf(item.element)
-    }
-
-    /// ステータスアイテムを押してメニューを開く。
-    ///
-    /// AX の `AXPress` は使わない。このアプリから呼ぶと常に -25204 (cannotComplete) を返し、
-    /// しかも判明するまで約 1.5 秒ブロックする（メイン/別スレッドどちらでも同じ）。
-    /// ユーザーが手で押すのと同じ実クリックを合成すれば即座に確実に開く。
-    /// アイテムが画面内にいる必要があるので、呼ぶ側は先に押し出しを畳んでおくこと。
-    @discardableResult
-    static func click(_ item: MenuBarItem) -> Bool {
-        let frame = frameOf(item.element)
-        guard frame.width > 0, frame.origin.x >= 0 else { return false }
-
-        // クリックの合成はカーソルごと動かしてしまう。ユーザーから見ると
-        // 「勝手にマウスがメニューバーへ飛ぶ」ので、元の位置を覚えて即座に戻す
-        let cursorBefore = CGEvent(source: nil)?.location
-
-        let point = CGPoint(x: frame.midX, y: frame.midY)
-        let source = CGEventSource(stateID: .combinedSessionState)
-        CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?
-            .post(tap: .cghidEventTap)
-        CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?
-            .post(tap: .cghidEventTap)
-
-        if let cursorBefore {
-            CGWarpMouseCursorPosition(cursorBefore)
-            // warp 後もイベント座標は飛んだ先のままになることがあるので、関連付けを張り直す
-            CGAssociateMouseAndMouseCursorPosition(1)
-        }
-        return true
     }
 
     // MARK: - AX ヘルパ

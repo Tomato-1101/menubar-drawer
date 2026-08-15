@@ -3,7 +3,6 @@ import ApplicationServices
 import OSLog
 
 /// 状態遷移は .notice で書く。.info/.debug は永続化されず `log show` で追えないため
-/// （field で消える不具合を後から追えなくなる）
 let log = Logger(subsystem: "com.tomato.menubar-drawer", category: "drawer")
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -12,15 +11,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pusher: ItemPusher!
     private var panel: DrawerPanel!
 
-    /// reveal で一時的に緩めた押し出し量。メニューを閉じたら戻す
-    private var pendingShift: CGFloat = 0
-    private var restoreMonitor: Any?
-    private var restoreTimer: Timer?
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestAccessibilityPermissionIfNeeded()
         log.notice("launched trusted=\(AXIsProcessTrusted())")
-
         applyDefaultPositionsIfNeeded()
 
         // 引き出しのアイコン。先に作ることで、後から作る押し出し帯より右（＝時計寄り）に置く
@@ -38,10 +31,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pusher = ItemPusher()
         pusher.push()
 
-        panel = DrawerPanel(
-            onSelect: { [weak self] item in self?.activate(item) },
-            onExtract: { [weak self] item in self?.extract(item) }
-        )
+        panel = DrawerPanel { [weak self] item in
+            self?.activate(item)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -69,9 +61,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let screen = buttonWindow.screen ?? NSScreen.main
         else { return }
 
-        // 前回 reveal したぶんが残っていれば、開くタイミングで押し出しを揃え直す
-        restorePush()
-
         // 引き出しに載せるのは「押し出されて隠れているもの」だけ。
         // メニューバーに出ているアイテムまで並べると同じものが二か所に見えてしまう
         let hidden = StatusItemScanner.scan().filter { $0.isOffscreen }
@@ -79,31 +68,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.show(items: hidden, below: anchor, on: screen)
     }
 
-    /// 引き出しから選ばれたアイテムのメニューを、引き出しのその場に出す。
+    // MARK: - 引き出しからメニューを開く
+
+    /// 選ばれたアイテムのメニューを、引き出しアイコンの真下に出す。
     ///
-    /// アイテムをメニューバーへ戻したりカーソルを飛ばしたりはしない。AX はメニューを開かなくても
-    /// 項目を読めるので、読んだ内容で自前のメニューを組んでマウス位置に表示し、選ばれた項目を
-    /// AX で実行する。AXMenu を持たないアプリ（ポップオーバー型）だけ従来のやり方に落とす。
+    /// アイテムは画面外に押し出したまま動かさない。カーソルも動かさない。
+    /// AX はメニューを開かなくても項目を読めるので、読んだ内容で自前のメニューを組んで表示し、
+    /// 選ばれた項目を AX で実行する。
     private func activate(_ item: MenuBarItem) {
         let entries = MenuReader.read(item)
         log.notice("activate \(item.displayName, privacy: .public) entries=\(entries.count)")
 
-        guard !entries.isEmpty else {
-            revealAndClick(item)
-            return
-        }
-
         panel.dismiss()
-        showMenu(buildMenu(entries))
+        showMenu(entries.isEmpty ? unsupportedMenu(for: item) : buildMenu(entries))
     }
 
     /// メニューは常に引き出しアイコンの真下に出す。
     /// マウス位置に出すと、押したセルの場所によって出てくる位置が毎回変わって落ち着かない。
     private func showMenu(_ menu: NSMenu) {
-        guard let button = statusItem.button, let window = button.window else {
-            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
-            return
-        }
+        guard let button = statusItem.button, let window = button.window else { return }
         let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
         menu.popUp(positioning: nil, at: NSPoint(x: anchor.minX, y: anchor.minY - 4), in: nil)
     }
@@ -135,95 +118,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuReader.perform(entry)
     }
 
-    /// AXMenu を読めないアプリ用のフォールバック。
-    /// 押し出しを畳んでアイテムを画面へ戻し、実クリックを合成して本物のメニューを開かせる。
-    private func revealAndClick(_ item: MenuBarItem) {
-        panel.dismiss()
-        let shift = pusher.reveal(itemAt: item.frame.origin.x, targetX: revealTargetX)
-        pendingShift += shift
-        log.notice("fallback reveal \(item.displayName, privacy: .public) shift=\(shift)")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.press(item)
-        }
-    }
-
-    /// 引き出しアイコンと押し出し帯の初期位置を、メニューバーのできるだけ右（Wi-Fi の左隣）に置く。
+    /// ポップオーバー型（クリックするとパネルが出るタイプ）は AX にメニューが無く、中身を読めない。
     ///
-    /// 帯より左が隠れる仕組みなので、帯が右にあるほど多くを隠せるうえ、
-    /// フォールバックでアイテムを一時的に戻すときの表示スペースも広くなる。
-    /// 値は小さいほど右（実測: Wi-Fi=365, 再生中=223, コントロールセンター=135）。
-    /// 一度書いたら以後は上書きしない — ユーザーが ⌘ドラッグで動かした位置を尊重する。
-    private func applyDefaultPositionsIfNeeded() {
-        let defaults = UserDefaults.standard
-        let iconKey = "NSStatusItem Preferred Position menubar-drawer-icon"
-        let separatorKey = "NSStatusItem Preferred Position menubar-drawer-separator"
-        if defaults.object(forKey: iconKey) == nil { defaults.set(380, forKey: iconKey) }
-        if defaults.object(forKey: separatorKey) == nil { defaults.set(390, forKey: separatorKey) }
-    }
+    /// 代わりにアイテムをメニューバーへ戻して合成クリックする、という手も動きはするが、
+    /// カーソルが勝手に飛ぶ挙動になるので入れない（Tomato 指示: 無理なら無理と言う・
+    /// 無理やりマウスを動かす動作は絶対に入れない）。できないことはそう表示して、
+    /// 折りたたみを一時解除する導線だけ出す。
+    private func unsupportedMenu(for item: MenuBarItem) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
 
-    /// アイテムを引き戻す先。ノッチの右側でなければ掴めない
-    private var revealTargetX: CGFloat {
-        let screen = statusItem.button?.window?.screen ?? NSScreen.main
-        if let notchRight = screen?.auxiliaryTopRightArea?.minX {
-            return notchRight + 40
+        for line in [
+            "\(item.displayName) は引き出しから開けません",
+            "クリックでパネルを出すタイプのため、メニューの中身を読み取れません"
+        ] {
+            let row = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            menu.addItem(row)
         }
-        return (screen?.frame.width ?? 1440) * 0.6
-    }
 
-    /// 引き出しから上へ引っ張り出されたアイテムを、メニューバーに常駐させる。
-    /// 引き出しアイコンの右隣へ ⌘ドラッグすれば押し出し帯の外側になり、以後は常に見える。
-    private func extract(_ item: MenuBarItem) {
-        panel.dismiss()
-        let shift = pusher.reveal(itemAt: item.frame.origin.x, targetX: revealTargetX)
-        log.notice("extract \(item.displayName, privacy: .public) 開始 shift=\(shift)")
+        menu.addItem(.separator())
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            guard let self,
-                  let button = self.statusItem.button,
-                  let window = button.window
-            else { return }
+        let release = NSMenuItem(title: "折りたたみを一時解除してメニューバーに戻す",
+                                 action: #selector(togglePush), keyEquivalent: "")
+        release.target = self
+        menu.addItem(release)
 
-            let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
-            ItemMover.move(item, toX: anchor.maxX + 14) { moved in
-                log.notice("extract \(item.displayName, privacy: .public) moved=\(moved)")
-                self.pusher.restore(shift: shift)
-            }
-        }
-    }
+        let hint = NSMenuItem(title: "常に出しておくには ⌘ を押しながら引き出しアイコンより右へドラッグ",
+                              action: nil, keyEquivalent: "")
+        hint.isEnabled = false
+        menu.addItem(hint)
 
-    private func press(_ item: MenuBarItem) {
-        let frame = StatusItemScanner.liveFrame(of: item)
-        let ok = StatusItemScanner.click(item)
-        log.notice("click \(item.displayName, privacy: .public) x=\(frame.origin.x) ok=\(ok)")
-        if pendingShift > 0 { scheduleRestore() }
-    }
-
-    /// 開いたメニューが閉じたら押し出しを元に戻す。
-    /// メニューを閉じる操作（どこかのクリック / Esc）を拾い、取りこぼした場合の保険に時間切れも置く。
-    private func scheduleRestore() {
-        cancelRestoreWatchers()
-        restoreMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp, .keyUp]) {
-            [weak self] _ in
-            self?.restorePush()
-        }
-        restoreTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
-            self?.restorePush()
-        }
-    }
-
-    private func restorePush() {
-        cancelRestoreWatchers()
-        guard pendingShift > 0 else { return }
-        pusher.restore(shift: pendingShift)
-        pendingShift = 0
-    }
-
-    private func cancelRestoreWatchers() {
-        if let restoreMonitor { NSEvent.removeMonitor(restoreMonitor) }
-        restoreMonitor = nil
-        restoreTimer?.invalidate()
-        restoreTimer = nil
+        return menu
     }
 
     // MARK: - 右クリックメニュー
@@ -256,15 +182,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePush() {
-        pendingShift = 0
         if pusher.isPushing {
             pusher.release()
         } else {
             pusher.push()
         }
+        log.notice("togglePush isPushing=\(self.pusher.isPushing)")
     }
 
-    // MARK: - 権限
+    // MARK: - 配置と権限
+
+    /// 引き出しアイコンと押し出し帯の初期位置を、メニューバーのできるだけ右（Wi-Fi の左隣）に置く。
+    ///
+    /// 帯より左が隠れる仕組みなので、帯が右にあるほど多くを隠せる。
+    /// 値は小さいほど右（実測: Wi-Fi=365, 再生中=223, コントロールセンター=135）。
+    /// 一度書いたら以後は上書きしない — ユーザーが ⌘ドラッグで動かした位置を尊重する。
+    private func applyDefaultPositionsIfNeeded() {
+        let defaults = UserDefaults.standard
+        let iconKey = "NSStatusItem Preferred Position menubar-drawer-icon"
+        let separatorKey = "NSStatusItem Preferred Position menubar-drawer-separator"
+        if defaults.object(forKey: iconKey) == nil { defaults.set(380, forKey: iconKey) }
+        if defaults.object(forKey: separatorKey) == nil { defaults.set(390, forKey: separatorKey) }
+    }
 
     private func requestAccessibilityPermissionIfNeeded() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary

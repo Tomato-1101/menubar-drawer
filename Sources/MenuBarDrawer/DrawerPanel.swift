@@ -10,10 +10,8 @@ final class DrawerPanel: NSPanel {
     private var localMonitor: Any?
     private var globalMonitor: Any?
 
-    init(onSelect: @escaping (MenuBarItem) -> Void, onExtract: @escaping (MenuBarItem) -> Void) {
-        hostingView = NSHostingView(
-            rootView: DrawerView(items: [], onSelect: onSelect, onExtract: onExtract)
-        )
+    init(onSelect: @escaping (MenuBarItem) -> Void) {
+        hostingView = NSHostingView(rootView: DrawerView(items: [], onSelect: onSelect))
 
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
@@ -41,11 +39,7 @@ final class DrawerPanel: NSPanel {
 
     /// 指定した画面座標（メニューバー上のボタン位置）の真下に、右端を揃えて開く。
     func show(items: [MenuBarItem], below anchor: NSRect, on screen: NSScreen) {
-        hostingView.rootView = DrawerView(
-            items: items,
-            onSelect: hostingView.rootView.onSelect,
-            onExtract: hostingView.rootView.onExtract
-        )
+        hostingView.rootView = DrawerView(items: items, onSelect: hostingView.rootView.onSelect)
         let size = hostingView.fittingSize
         setContentSize(size)
 
@@ -138,7 +132,6 @@ private final class GlassBackgroundView: NSVisualEffectView {
 struct DrawerView: View {
     let items: [MenuBarItem]
     let onSelect: (MenuBarItem) -> Void
-    let onExtract: (MenuBarItem) -> Void
 
     private let cellWidth: CGFloat = 78
     private let cellHeight: CGFloat = 70
@@ -156,13 +149,7 @@ struct DrawerView: View {
                     spacing: 6
                 ) {
                     ForEach(items) { item in
-                        DrawerCell(
-                            item: item,
-                            width: cellWidth,
-                            height: cellHeight,
-                            action: { onSelect(item) },
-                            onDragOut: { onExtract(item) }
-                        )
+                        DrawerCell(item: item, width: cellWidth, height: cellHeight) { onSelect(item) }
                     }
                 }
             }
@@ -196,30 +183,18 @@ private struct DrawerCell: View {
     let width: CGFloat
     let height: CGFloat
     let action: () -> Void
-    /// 上（メニューバーの方向）へ引っ張り出す＝メニューバーに常駐させる
-    let onDragOut: () -> Void
 
     @State private var isHovered = false
-    @State private var dragOffset: CGSize = .zero
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 6) {
-                if let icon = item.icon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 32, height: 32)
-                } else {
-                    Image(systemName: "app.dashed")
-                        .font(.system(size: 26))
-                        .foregroundStyle(.primary.opacity(0.5))
-                }
+                icon
                 Text(item.displayName)
                     .font(.system(size: 10))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .foregroundStyle(.primary.opacity(0.78))
+                    .foregroundStyle(.primary.opacity(item.canOpenInDrawer ? 0.78 : 0.45))
             }
             .frame(width: width, height: height)
             .background(
@@ -230,22 +205,41 @@ private struct DrawerCell: View {
         .buttonStyle(.plain)
         .accessibilityLabel(item.displayName)
         .onHover { isHovered = $0 }
-        .help(item.help.isEmpty
-              ? "\(item.displayName)  —  上へドラッグでメニューバーに出す"
-              : "\(item.help)\n上へドラッグでメニューバーに出す")
-        .offset(dragOffset)
-        .zIndex(dragOffset == .zero ? 0 : 1)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 8)
-                .onChanged { value in
-                    // 上方向の引き出しだけ追従させる（横スワイプで誤発火させない）
-                    dragOffset = CGSize(width: value.translation.width * 0.3, height: min(0, value.translation.height))
+        .help(helpText)
+    }
+
+    /// 引き出しから開けないもの（ポップオーバー型）は薄く出し、右下に印を付ける
+    private var icon: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let image = item.icon {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 32, height: 32)
+                } else {
+                    Image(systemName: "app.dashed")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.primary.opacity(0.5))
                 }
-                .onEnded { value in
-                    let pulledOut = value.translation.height < -24
-                    dragOffset = .zero
-                    if pulledOut { onDragOut() }
-                }
-        )
+            }
+            .opacity(item.canOpenInDrawer ? 1 : 0.45)
+
+            if !item.canOpenInDrawer {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .background(Circle().fill(.black.opacity(0.35)))
+                    .offset(x: 3, y: 2)
+            }
+        }
+        .frame(width: 32, height: 32)
+    }
+
+    private var helpText: String {
+        if !item.canOpenInDrawer {
+            return "\(item.displayName) は引き出しから開けません（クリックでパネルを出すタイプ）"
+        }
+        return item.help.isEmpty ? item.displayName : item.help
     }
 }
