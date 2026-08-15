@@ -21,6 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestAccessibilityPermissionIfNeeded()
         log.notice("launched trusted=\(AXIsProcessTrusted())")
 
+        applyDefaultPositionsIfNeeded()
+
         // 引き出しのアイコン。先に作ることで、後から作る押し出し帯より右（＝時計寄り）に置く
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.autosaveName = "menubar-drawer-icon"
@@ -77,21 +79,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.show(items: hidden, below: anchor, on: screen)
     }
 
-    /// 引き出しから選ばれたアイテムを押す。
-    /// メニューはステータスアイテム自身の位置に開くので、押す前に必要なぶんだけ押し出しを緩めて
-    /// 対象を画面内へ引き戻しておく（緩めないと、メニューが画面外に開いて見えない）。
+    /// 引き出しから選ばれたアイテムのメニューを、引き出しのその場に出す。
+    ///
+    /// アイテムをメニューバーへ戻したりカーソルを飛ばしたりはしない。AX はメニューを開かなくても
+    /// 項目を読めるので、読んだ内容で自前のメニューを組んでマウス位置に表示し、選ばれた項目を
+    /// AX で実行する。AXMenu を持たないアプリ（ポップオーバー型）だけ従来のやり方に落とす。
     private func activate(_ item: MenuBarItem) {
-        panel.dismiss()
+        let entries = MenuReader.read(item)
+        log.notice("activate \(item.displayName, privacy: .public) entries=\(entries.count)")
 
+        guard !entries.isEmpty else {
+            revealAndClick(item)
+            return
+        }
+
+        panel.dismiss()
+        showMenu(buildMenu(entries))
+    }
+
+    /// メニューは常に引き出しアイコンの真下に出す。
+    /// マウス位置に出すと、押したセルの場所によって出てくる位置が毎回変わって落ち着かない。
+    private func showMenu(_ menu: NSMenu) {
+        guard let button = statusItem.button, let window = button.window else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            return
+        }
+        let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
+        menu.popUp(positioning: nil, at: NSPoint(x: anchor.minX, y: anchor.minY - 4), in: nil)
+    }
+
+    private func buildMenu(_ entries: [MenuEntry]) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        for entry in entries {
+            if entry.isSeparator {
+                menu.addItem(.separator())
+                continue
+            }
+            let menuItem = NSMenuItem(title: entry.title, action: #selector(runEntry(_:)), keyEquivalent: "")
+            menuItem.target = self
+            menuItem.representedObject = entry
+            menuItem.isEnabled = entry.isEnabled
+            menuItem.state = entry.isChecked ? .on : .off
+            if !entry.submenu.isEmpty {
+                menuItem.submenu = buildMenu(entry.submenu)
+            }
+            menu.addItem(menuItem)
+        }
+        return menu
+    }
+
+    @objc private func runEntry(_ sender: NSMenuItem) {
+        guard let entry = sender.representedObject as? MenuEntry else { return }
+        MenuReader.perform(entry)
+    }
+
+    /// AXMenu を読めないアプリ用のフォールバック。
+    /// 押し出しを畳んでアイテムを画面へ戻し、実クリックを合成して本物のメニューを開かせる。
+    private func revealAndClick(_ item: MenuBarItem) {
+        panel.dismiss()
         let shift = pusher.reveal(itemAt: item.frame.origin.x, targetX: revealTargetX)
         pendingShift += shift
-        log.notice("activate \(item.displayName, privacy: .public) x=\(item.frame.origin.x) shift=\(shift)")
+        log.notice("fallback reveal \(item.displayName, privacy: .public) shift=\(shift)")
 
-        // 押し出しを緩めた直後はメニューバーが再レイアウト中で、AX も移動途中の座標を返す
-        // （実測: ノッチの下 x=825 を返し、そこを押したら boringNotch が開いた）。落ち着かせてから押す。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.press(item)
         }
+    }
+
+    /// 引き出しアイコンと押し出し帯の初期位置を、メニューバーのできるだけ右（Wi-Fi の左隣）に置く。
+    ///
+    /// 帯より左が隠れる仕組みなので、帯が右にあるほど多くを隠せるうえ、
+    /// フォールバックでアイテムを一時的に戻すときの表示スペースも広くなる。
+    /// 値は小さいほど右（実測: Wi-Fi=365, 再生中=223, コントロールセンター=135）。
+    /// 一度書いたら以後は上書きしない — ユーザーが ⌘ドラッグで動かした位置を尊重する。
+    private func applyDefaultPositionsIfNeeded() {
+        let defaults = UserDefaults.standard
+        let iconKey = "NSStatusItem Preferred Position menubar-drawer-icon"
+        let separatorKey = "NSStatusItem Preferred Position menubar-drawer-separator"
+        if defaults.object(forKey: iconKey) == nil { defaults.set(380, forKey: iconKey) }
+        if defaults.object(forKey: separatorKey) == nil { defaults.set(390, forKey: separatorKey) }
     }
 
     /// アイテムを引き戻す先。ノッチの右側でなければ掴めない
