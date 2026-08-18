@@ -1,96 +1,91 @@
 # menubar-drawer
 
-メニューバーを1アイコンだけにして、隠したものを引き出しから操作する macOS 常駐アプリ。
+Declutter an overcrowded macOS menu bar — push third-party status items out of sight and control them from a glass drawer, without a single synthetic mouse movement.
 
-## 何をするか
+[English](README.md) | [日本語](README.ja.md) | [中文](README.zh.md)
 
-- サードパーティのステータスアイテムをメニューバーの外へ押し出して、見た目を空にする
-- メニューバーに残るのは **menubar-drawer のアイコン1つ** と OS 純正（時計・バッテリー・Wi-Fi・入力ソース・コントロールセンター）
-- アイコンを押すと直下にガラスの引き出しが降り、隠れているアイテムがグリッドで並ぶ
-- 引き出しの中のアイコンを押すと、**引き出しアイコンの真下にそのアプリのメニューが出る**
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-000000.svg)
+![Swift](https://img.shields.io/badge/swift-6.0-F05138.svg)
 
-## 動作の原則（Tomato 指示・変更しないこと）
+## Why
 
-**既定ではユーザーのマウスカーソルを動かさない。** ⌘ドラッグを合成して並べ替える実装は
-（技術的には動くことを確認済みだが）入れない。できないことは、できないと画面に出す。
+macOS gives every app the right to plant an icon in the menu bar, and gives you no built-in way to hide, group, or manage them. The usual fix — Bartender, Ice, Hidden Bar — hides the overflow by pushing it off-screen, but to actually *use* one of those hidden items you still have to reveal it back onto the visible bar, find it, and click it. menubar-drawer takes a different approach: since macOS's Accessibility (AX) tree exposes a hidden item's menu even while it's sitting off-screen and unopened, the app can read that menu directly and let you act on it from a single drawer — the item never has to come back onto the bar, and the mouse cursor never has to move to reach it.
 
-唯一の例外は設定「**展開したら自動でクリックする**」（右クリックメニュー・既定 OFF）。
-利用者が明示的に ON にしたときだけ、展開したアイテムを1回クリックする。
+## Features
 
-## 使い方
+- **One visible icon.** Every third-party status item is pushed off-screen using the same wide-dummy-`NSStatusItem` technique as Hidden Bar/Ice/Bartender; only the drawer icon and Apple's own menu-bar items (clock, battery, Wi-Fi, Control Center) remain.
+- **Click the icon → a glass drawer drops down** directly below it, showing every hidden item as an icon in a grid.
+- **Reads each item's menu without opening it.** This is the technical core of the project, implemented in [`MenuReader.swift`](Sources/MenuBarDrawer/MenuReader.swift): macOS's Accessibility tree exposes an `AXMenu` and its `AXMenuItem` children for a status item even when that item is off-screen and its menu has never been opened. `MenuReader` walks that tree (up to 3 levels of submenus) to build the drawer's own `NSMenu`, and executes the chosen item by sending `AXUIElementPerformAction(..., kAXPressAction)` straight to the underlying `AXMenuItem` — the target app's own menu never has to open, and the cursor never has to travel to it.
+- **Heuristic fallback for apps without an `AXMenu`.** Apps built on `NSPopover` (not `NSMenu`) don't expose an AX menu tree at all, so the app presses the item and classifies *what happened next* into one of five routes — a Spotlight-style global hotkey, a lazily-generated menu, an on-screen window, an off-screen window that needs repositioning, or "give up and reveal it to the menu bar." Each route (`routePopover` in `AppDelegate.swift`) was derived empirically against real apps on the author's own menu bar.
+- **Liquid Glass drawer UI** built on `NSVisualEffectView` with `.hudWindow` material and `.behindWindow` blending, so the drawer live-blurs whatever's on screen behind it (SwiftUI's own `Material`/`glassEffect` can't sample behind the window, so the glass layer is plain AppKit wrapped for SwiftUI content).
+- **Right-click the drawer icon** for a context menu: temporarily un-collapse the pushed items, jump to Accessibility settings, or quit.
+- **Menu bar reordering stays 100% native** — drag items with Cmd as macOS normally allows; the app never touches item order itself.
 
-```sh
-./scripts/build_app.sh     # dist/menubar-drawer.app を作る（Apple Development 証明書で署名）
+## Architecture
+
+```mermaid
+flowchart TD
+    Push["ItemPusher<br/>pushes 3rd-party items off-screen<br/>(wide dummy NSStatusItem)"] --> Scan["StatusItemScanner<br/>enumerates items via AXExtrasMenuBar"]
+    Scan --> Click["User clicks the drawer icon"]
+    Click --> Read["MenuReader<br/>reads AXMenu tree WITHOUT opening it"]
+    Read --> HasMenu{"AXMenu found?"}
+    HasMenu -->|yes| Drawer["DrawerPanel<br/>Liquid Glass grid UI"]
+    Drawer -->|select item| Exec["AXUIElementPerformAction<br/>on the AXMenuItem directly"]
+    HasMenu -->|no| Popover["routePopover heuristics<br/>(AppDelegate)"]
+    Popover --> Route["hotkey / lazy-menu / window /<br/>reveal-to-menu-bar"]
+```
+
+## Tech Stack
+
+Swift 6, AppKit (status items, panels, Accessibility API), SwiftUI (drawer content view only), the macOS Accessibility APIs (`ApplicationServices` / `AXUIElement`), and Swift Package Manager. No third-party dependencies.
+
+## Getting Started
+
+Requirements: macOS 14+, a Swift 6 toolchain (Xcode or the Swift toolchain installer), and an Apple Development signing certificate (see [Design Decisions](#design-decisions) for why ad-hoc signing isn't used).
+
+```bash
+git clone <this repo>
+cd menubar-drawer
+./scripts/build_app.sh       # swift build -c release, then packages + code-signs dist/menubar-drawer.app
 open dist/menubar-drawer.app
 ```
 
-初回はアクセシビリティ権限が必要（システム設定 → プライバシーとセキュリティ → アクセシビリティ）。
+On first launch, grant Accessibility permission when prompted (System Settings → Privacy & Security → Accessibility). Without it, the drawer stays empty and shows an in-app hint pointing you to the setting.
 
-- 引き出しアイコンを**右クリック**: 折りたたみの一時解除 / 権限設定 / 終了
-- メニューバーの並べ替えは **⌘ドラッグ**（macOS 標準の操作）。引き出しアイコンより左に置けば折りたたまれ、右に置けば常に見える
+- **Right-click** the drawer icon for temporary un-collapse / settings / quit.
+- **Reorder** the menu bar the normal macOS way: Cmd-drag. Anything left of the drawer icon gets collapsed; anything right of it always stays visible.
 
-## 仕組み
-
-macOS には他アプリのステータスアイテムを隠す API も、クリックする API もない。
-隠す部分は Ice / Bartender / Hidden Bar と同じ方法だが、**操作の部分はこのアプリ独自**。
-
-1. **押し出し** (`ItemPusher`) — 幅 4000pt のダミー `NSStatusItem` を1つ置き、その左のアイテムを画面外へ追い出す
-2. **列挙** (`StatusItemScanner`) — 各アプリの AX 属性 `AXExtrasMenuBar` からステータスアイテムを取り、位置・名前・アイコンを得る
-3. **メニューの読み取り** (`MenuReader`) — ★ここが肝。**メニューを開かなくても** AX ツリーには `AXMenu` と
-   その `AXMenuItem` が生えており、押し出されて画面外にいるアイテムでも項目が全部読める。
-   読んだ内容で自前の `NSMenu` を組んで引き出しアイコンの真下に出し、選ばれた項目を `AXPress` で実行する。
-   アイテムは画面外に置いたまま、カーソルも一切動かさない
-
-AXMenu を持たないアプリも、下の「ポップオーバー型の開き方」の振り分けでほぼ全部開ける
-（この Mac で従来フォールバックに落ちるのは微信だけ）。小窓で開くものは位置も
-引き出しアイコン直下に揃える（幅 600 未満を小窓とみなす。Nani のような通常ウィンドウは
-アプリが決めた位置を尊重して動かさない）。
-
-## 実測でわかったこと（推測でいじらないための記録）
-
-| 事実 | 影響 |
-|---|---|
-| **AX はメニューを開かなくても項目を読める。画面外に押し出したアイテムでも読める** | 自前メニュー方式が成立する。この一点で設計が決まった |
-| 読んだ `AXMenuItem` は `AXPress` で実行できる（Tailscale の Open Tailscale で実機確認） | 引き出しから直接メニュー項目を実行できる |
-| ステータスアイテム本体への `AXPress` はこのアプリから呼ぶと **-25204** で失敗し、判明まで約1.5秒ブロック | 本体は押さない。項目を直接押す |
-| `NSStatusItem.length` の実効上限は約 **5002pt**。超える値を入れても getter は入れた値を返す | 10000 を入れると「縮めたのに実効幅が変わらない」バグになる。4000 に固定 |
-| `NSStatusItem Preferred Position <autosaveName>` は**値が小さいほど右**（実測: Wi-Fi=365 / 再生中=223 / コントロールセンター=135） | 引き出しアイコンは 380（Wi-Fi の左隣）に置き、隠せる範囲を最大化 |
-| ⌘ドラッグの合成自体は機能する（単独検証で What Watt? を 1178→957 に移動できた）が、**押し出し帯が経路に残っていると1ptも動かない** | 並べ替えの自動化は技術的には可能。ただしカーソルを動かすので**採用しない** |
-| このマシンのノッチは **x=665〜850**（`NSScreen.auxiliaryTopRightArea` が 850 から） | 押し出しを解除しても、ノッチ下に来たアイテムは表示されず掴めない |
-
-## ポップオーバー型（AX にメニューが無いアプリ）の開き方
-
-開き方はアプリごとに違い事前に見分けられないので、**押してから何が起きたかで振り分ける**
-（AppDelegate の `routePopover`。どのルートを通ったかは log の `route=` で追える）:
-
-| ルート | 対象（実測） | 何をするか |
-|---|---|---|
-| `spotlight-hotkey` | Spotlight（AXPress を無視する唯一の例） | symbolichotkeys から実際のショートカットを読んでキー合成 |
-| `lazy-menu` | moomoo_OpenD（押すと AXMenu が遅延生成される） | 画面外に開いたメニューを Esc で捨て、読めた項目で自前メニュー |
-| `window-onscreen` | Nani（通常ウィンドウ・幅600以上） | 何もしない（アプリが決めた位置を尊重） |
-| `window-onscreen-moved` | Blip（小窓が画面内の変な位置に開く） | AX で kAXPosition を書いて引き出しアイコン直下へ揃える |
-| `window-pulled` | Passwords（ポップオーバーがアイテム x に張り付き画面外に開く） | 同上（画面外からの引き戻し） |
-| `reveal` | 上のどれも起きないアプリ（微信で実測） | 従来どおりメニューバーに展開して利用者に押してもらう |
-
-## 既知の制約
-
-- `reveal` に落ちたアプリが隠し群の中央にあると、展開してもノッチの下に入って見えない。
-  その場合は自動で畳んで、理由と代替手段（⌘ドラッグで常時表示にする）を出す
-- 押下後の判定待ちは 0.8 秒固定。開くのがそれより遅いアプリは `reveal` に落ちる
-- Spotlight のショートカットが OS 設定で無効なら `reveal` に落ちる
-- サブメニューが遅延生成されるアプリでは、一部のサブメニューが自前メニュー側に出ない（Tailscale の Network Devices など）
-
-## 構成
+## Project Structure
 
 ```
 Sources/MenuBarDrawer/
-  main.swift              起動
-  AppDelegate.swift       アイコン・引き出しの開閉・自前メニューの構築と表示
-  MenuReader.swift        AX からメニュー項目を読む / 項目を実行する（★中核）
-  StatusItemScanner.swift AX でステータスアイテムを列挙
-  ItemPusher.swift        押し出し帯（幅可変のダミー NSStatusItem）
-  DrawerPanel.swift       ガラスの引き出し（NSPanel + SwiftUI）
-spike/                    技術検証スクリプト（swift spike/xxx.swift で単体実行）
-  read_menu.swift         ★方針を決めた検証: 開かずに項目を読めるか / 項目を実行できるか
-  menu_survey.swift       全アイテムについて引き出しから開けるかの一覧
+  main.swift               Entry point
+  AppDelegate.swift        Icon + drawer lifecycle, popover-routing heuristics, context menu
+  MenuReader.swift          ★ core: reads AX menu items without opening them, executes via AXPress
+  StatusItemScanner.swift  Enumerates status items via the AX tree
+  ItemPusher.swift         The push-off-screen band (variable-width dummy NSStatusItem)
+  DrawerPanel.swift        The Liquid Glass drawer (NSPanel + SwiftUI)
+  SpotlightHotkey.swift    Reads the user's real Spotlight shortcut and synthesizes it
+  WindowDetector.swift     Detects popover/window appearance for the fallback routing
+spike/                     Standalone technical spikes (run with `swift spike/xxx.swift`)
+  read_menu.swift           ★ the experiment that decided the whole architecture:
+                             can a hidden item's menu be read, and its items executed,
+                             without ever opening the menu?
 ```
+
+## Design Decisions
+
+**The mouse cursor is never moved or synthetically clicked to operate another app's status item.** This is a deliberate, tested-and-rejected trade-off, not a limitation: synthesizing a Cmd-drag to reorder items was proven to work in isolation (moved a test item from x=1178 to x=957), but it was **not adopted**, because doing so takes over the user's actual cursor. Where an item genuinely can't be reached any other way, the app says so on screen and offers the manual alternative (Cmd-drag it yourself) instead of silently taking control of the mouse. The one narrow, opt-in exception is a right-click setting, **default OFF**, that performs a single synthetic click only on an item the user just explicitly revealed to the menu bar themselves.
+
+**Reading AX menus without opening them is what made the whole design possible.** Before this was confirmed (see `spike/read_menu.swift`), the only way to operate a hidden status item was to reveal it and click it for real. Once it was confirmed that off-screen, unopened items still expose a full `AXMenu`/`AXMenuItem` tree, the "self-contained drawer" design — read the menu, show it in the app's own UI, execute the chosen entry directly — became possible without moving the cursor at all for the common case.
+
+**A real Apple Development signing identity is used instead of ad-hoc/self-signing.** Ad-hoc signing changes the binary's `cdhash` on every rebuild, which resets the Accessibility permission grant — the one permission this app cannot function without. Signing with a stable Development identity keeps that grant intact across rebuilds during iteration.
+
+## Status
+
+A working personal tool, exercised against a specific real-world menu bar (see the empirical findings and per-app routing table baked into the source comments). It is signed with a local Apple Development certificate for personal use — not notarized or distributed via the App Store, so it only runs on the machine(s) it's built and signed on. There's no automated test suite; correctness is validated with the `spike/` scripts and manual testing against real apps. Some apps still fall back to the plain "reveal to menu bar" behavior when none of the popover-routing heuristics match.
+
+## License
+
+[MIT](LICENSE)
